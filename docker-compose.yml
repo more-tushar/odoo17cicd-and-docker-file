@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  postgres-db:
+    image: 3.110.136.88:8085/repository/odoo17-main/postgres:15  # Use Nexus repo
+    build:
+      context: .
+      dockerfile: Dockerfile-postgres
+    container_name: postgres-db
+    networks:
+      - odoo_network
+    restart: always
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+
+  odoo-prod:
+    image: 3.110.136.88:8085/repository/odoo17-main/odoo17-odoo-prod:latest  # Push to Nexus
+    build: .
+    container_name: odoo-prod
+    networks:
+      - odoo_network
+    restart: always
+    depends_on:
+      - postgres-db
+    ports:
+      - "8070:8069"
+      - "8071:8072"
+    environment:
+      - ODOO_DATABASE_NAME=prod-odoo
+    volumes:
+      - odoo_prod_data:/var/lib/odoo
+      - odoo_filestore:/var/lib/odoo/.local/share/Odoo/filestore/prod-odoo/
+
+    command: ["python", "-m", "odoo", "--config=/etc/odoo/odoo.conf"]
+
+volumes:
+  postgres_data:
+  odoo_prod_data:
+  odoo_filestore:
+
+networks:
+  odoo_network:
+    driver: bridge
+  

@@ -1,0 +1,7 @@
+FROM postgres:15
+
+# Set environment variables
+ENV POSTGRES_USER=odoo
+ENV POSTGRES_PASSWORD=odoo
+
+EXPOSE 5432
