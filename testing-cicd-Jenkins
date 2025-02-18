@@ -1,0 +1,134 @@
+pipeline {
+    agent any
+   
+        environment {
+            registry = '3.110.136.88:8086'                         // Nexus repo URL
+            registryCredentials = 'nexus'                         // Nexus credentials in Jenkins
+            imageName = 'odoo17-odoo-test'                        // Docker image name
+            dbImageName = 'postgres'
+            imagetag = "${BUILD_NUMBER}"                          // Image tag
+            NEXUS_USERNAME = credentials('nexus')                 // Get username from Jenkins credentials
+            NEXUS_PASSWORD = credentials('nexus')                 // Get password from Jenkins credentials
+            RECIPIENTS = "support@expertit.in"
+         }
+       
+    stages {
+        
+        stage('Checkout Code') {
+            steps {
+            checkout scmGit(branches: [[name: '*/release/odoo-test']], extensions: [], userRemoteConfigs: [[credentialsId: 'odoo17_git', url: 'https://tushar-m@bitbucket.org/expertit-scloudx/test-prod.git']])
+            }
+        }
+        
+        stage('Update Docker Compose Image Tags') {
+            steps {
+                script {
+                    sh "sed -i 's|odoo17-odoo-test:latest|odoo17-odoo-test:${BUILD_NUMBER}|g' docker-compose.yml"
+                  }
+                }
+            }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    sh "docker-compose build --no-cache"
+                }
+             }
+         }
+        
+        stage('Verify Docker Images') {
+            steps {
+                script {
+                    // Check if the Docker images are created
+                    sh "docker images "
+                    sh "docker ps "
+                    sh "docker images | grep -E 'odoo17|postgres'"
+                }
+            } 
+        }
+       
+        
+        stage('Push Image to Nexus') {
+        steps {
+        script {
+            def version = "${BUILD_NUMBER}" // Unique tag for Odoo image
+            def dbImage = "${registry}/repository/odoo17-test-prod/postgres:15" // Database image (common)
+            def dbImageExists = false
+           
+                // Use credentials for login
+                withCredentials([usernamePassword(credentialsId: 'nexus', usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                    // Login to Nexus registry
+                    sh 'echo $NEXUS_PASSWORD | docker login 3.110.136.88:8086 --username $NEXUS_USERNAME --password-stdin'
+                    
+                    // Check if the database image exists in Nexus
+                    def result = sh(script: "docker pull ${dbImage} || echo 'NOT_FOUND'", returnStdout: true).trim()
+                    
+                    if (!result.contains("NOT_FOUND")) {
+                        dbImageExists = true
+                    }
+    
+                    // Push image if not found
+                    if (!dbImageExists) {
+                        echo "Database image not found. Pushing to Nexus..."
+                        sh "docker push ${dbImage}"
+                    } else {
+                        echo "Database image already exists. Skipping push."
+                    }
+    
+                    // Always push the Odoo image with a new version tag
+                    sh "docker push ${registry}/repository/odoo17-test-prod/${imageName}:${version}"
+                    
+                    // Logout from Docker registry
+                    sh 'docker logout 3.110.136.88:8086'
+                }
+            }
+        }
+    }
+
+    stage('Verify SSH, Pull Images, and Run Containers') {
+    steps {
+        script {
+            def remoteHost = "ubuntu@15.207.14.223"
+            def registry = "3.110.136.88:8086"
+            def odooImage = "${registry}/repository/odoo17-test-prod:${BUILD_NUMBER}"
+            def dbImage = "${registry}/repository/odoo17-test-prod/postgres:15"
+
+             sshagent(['ec2_odoo_testing_env']) {
+                        // Verify SSH Connection
+                        sh "ssh -o StrictHostKeyChecking=no ${remoteHost} "
+
+                        // Authenticate with Nexus before executing SSH commands
+                        withCredentials([usernamePassword(credentialsId: 'nexus', usernameVariable: 'NEXUS_USERNAME', passwordVariable: 'NEXUS_PASSWORD')]) {
+                            
+                            // Login to Nexus registry
+                            sh "echo $NEXUS_PASSWORD | docker login ${registry} --username $NEXUS_USERNAME --password-stdin"
+                            
+                            // Run commands on remote server
+                            sh '''
+                            ssh ${remoteHost} << 'EOF'
+                                # Pull and run PostgreSQL container
+                                docker stop postgres-db || true
+                                docker rm postgres-db || true
+                                docker run -d --name postgres-db --restart always --network odoo_network \
+                                -e POSTGRES_USER=odoo -e POSTGRES_PASSWORD=odoo -p 5432:5432 \
+                                -v postgres_data:/var/lib/postgresql/data \
+                                ${dbImage}
+                            
+                                # Pull and run Odoo container
+                                docker stop odoo-test || true
+                                docker rm odoo-test || true
+ 
+                                docker run -d --name odoo-test  --restart always --network odoo_network \
+                                -p 8070:8069 -p 8071:8072 \
+                                -e ODOO_DATABASE_NAME=test-odoo \
+                                -v odoo_prod_data:/var/lib/odoo \
+                                3.110.136.88:8086/repository/odoo17-test-prod/odoo17-odoo-prod:${BUILD_NUMBER}
+                            EOF
+                            '''
+                            // Logout from Nexus registry
+                            sh "docker logout ${registry}"
+                        }
+            }
+        }
+    }
+}
